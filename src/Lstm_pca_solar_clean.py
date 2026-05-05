@@ -69,14 +69,14 @@ def load_pair(tp: Path, pp: Path):
         s = str(col); return int(''.join(ch for ch in s if ch.isdigit()) or 0)
     pcs_t = [c for c in t.columns if str(c).upper().startswith("PC")]
     pcs_p = [c for c in p.columns if str(c).upper().startswith("PC")]
-    PC_COLS = [c for c in sorted(pcs_t, key=pc_key) if c in pcs_p]
-    if not PC_COLS: raise ValueError("No common PC columns between trainer and predictor.")
+    feature_cols = [c for c in sorted(pcs_t, key=pc_key) if c in pcs_p]
+    if not feature_cols: raise ValueError("No common PC columns between trainer and predictor.")
 
     print(f"[Solar LSTM] Using target: {TARGET}")
-    print(f"[Solar LSTM] PCs: {PC_COLS}")
-    return t, p, PC_COLS, TARGET
+    print(f"[Solar LSTM] PCs: {feature_cols}")
+    return t, p, feature_cols, TARGET
 
-train_df, pred_df, PC_COLS, TARGET = load_pair(TRAIN_PATH, PRED_PATH)
+train_df, pred_df, feature_cols, TARGET = load_pair(TRAIN_PATH, PRED_PATH)
 
 # ---------------- Target normalization (log1p) ----------------
 ylog = np.log1p(np.clip(train_df[TARGET].values, 0, None))
@@ -85,8 +85,8 @@ to_norm   = lambda y: (np.log1p(np.clip(y, 0, None)) - mean_log) / std_log
 from_norm = lambda z: np.maximum(np.expm1(z * std_log + mean_log), 0.0)
 
 # ---------------- Build sequences WITH target history channel ----------------
-def make_sequences_with_target(df: pd.DataFrame, pc_cols, target_col, steps: int):
-    V = df[pc_cols].values.astype(np.float32)      # (N, k) PCs
+def make_sequences_with_target(df: pd.DataFrame, feature_cols, target_col, steps: int):
+    V = df[feature_cols].values.astype(np.float32)      # (N, k) PCs
     T = df[target_col].values.astype(np.float32)   # (N,)  solar target
     Tn = to_norm(T)
     X, Y = [], []
@@ -99,7 +99,7 @@ def make_sequences_with_target(df: pd.DataFrame, pc_cols, target_col, steps: int
     return np.asarray(X, np.float32), np.asarray(Y, np.float32)
 
 # Trainer sequences (time-ordered split for realistic val)
-X_all, Y_all = make_sequences_with_target(train_df, PC_COLS, TARGET, TIMESTEPS)
+X_all, Y_all = make_sequences_with_target(train_df, feature_cols, TARGET, TIMESTEPS)
 s1, s2 = int(0.70*len(X_all)), int(0.85*len(X_all))
 X_train, Y_train = X_all[:s1], Y_all[:s1]
 X_val,   Y_val   = X_all[s1:s2], Y_all[s1:s2]
@@ -125,7 +125,7 @@ class LSTMReg(nn.Module):
     def forward(self, x):
         out, _ = self.lstm(x); out = self.drop(out[:, -1, :]); return self.fc(out)
 
-INPUT_SIZE = len(PC_COLS) + 1
+INPUT_SIZE = len(feature_cols) + 1
 model = LSTMReg(INPUT_SIZE).to(DEVICE)
 criterion = nn.SmoothL1Loss(beta=1.0)  # Huber in normalized log space
 opt = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
@@ -172,7 +172,7 @@ plt.xlabel("Epoch"); plt.ylabel("Loss"); plt.grid(True); plt.tight_layout(); plt
 
 # ---------------- Predict on predictor half (solar) ----------------
 def predict_pred_half(df_pred: pd.DataFrame):
-    Xp, Yp = make_sequences_with_target(df_pred, PC_COLS, TARGET, TIMESTEPS)
+    Xp, Yp = make_sequences_with_target(df_pred, feature_cols, TARGET, TIMESTEPS)
     with torch.no_grad():
         yhat_norm = model(torch.tensor(Xp).to(DEVICE)).cpu().numpy().flatten()
     yhat  = from_norm(yhat_norm)

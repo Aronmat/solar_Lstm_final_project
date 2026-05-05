@@ -2,12 +2,34 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-TRAIN_PATH = ROOT / "data" / "pca_trainer_with_solar_HALFYEAR.csv"
-PRED_PATH  = ROOT / "data" / "pca_predictor_with_solar_HALFYEAR.csv"
+HISTORICAL_DATA_PATH = ROOT / "data" / "solar_energy_data.csv.xlsx"
+LOCAL_DATA_DIR = ROOT / "data" / "local"
+LOCAL_FILE_PATTERN = "gpg_*.csv"
 
-TARGET = "solar_generation_mw"
+HISTORICAL_TARGET = "DE_solar_generation_actual"
+LOCAL_TARGET = "PV_Power_W"
 
-TIMESTEPS = 72
+HISTORICAL_FEATURE_COLS = [
+    "SWTDN",
+    "SWGDN",
+    "cloudcover",
+    "humidity",
+    "dew",
+]
+
+LOCAL_FEATURE_COLS = [
+    "Solar_Irradiance_Wm2",
+    "UV_Index",
+    "Air_Temp_C",
+    "Humidity_pct",
+    "Wind_Speed_ms",
+]
+HISTORICAL_TIMESTEPS = 72
+HISTORICAL_FORECAST_HORIZON = 1
+
+LOCAL_TIMESTEPS = 60
+LOCAL_FORECAST_HORIZON = 5
+
 HIDDEN_SIZE = 128
 NUM_LAYERS = 2
 DROPOUT = 0.15
@@ -18,4 +40,8 @@ WEIGHT_DECAY = 1e-5
 PATIENCE = 12
 SEED = 42
 DEVICE = "cpu"
+
 USE_SPLINE = True
+SHOW_BATCH_PROGRESS = True
+BATCH_PRINT_EVERY = 10
+RUN_FEATURE_IMPORTANCE = True

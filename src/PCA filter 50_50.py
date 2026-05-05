@@ -60,13 +60,13 @@ def main():
     n_components = min(5, X_train_scaled.shape[1])  # 2..5 depending on available features
     pca = PCA(n_components=n_components, random_state=42)
     pcs_train = pca.fit_transform(X_train_scaled)
-    pc_cols = [f"PC{i}" for i in range(1, n_components + 1)]
+    feature_cols = [f"PC{i}" for i in range(1, n_components + 1)]
 
     # compose trainer output
     trainer_out_df = pd.concat(
         [
             train_df[["timestamp"]].reset_index(drop=True),
-            pd.DataFrame(pcs_train, columns=pc_cols),
+            pd.DataFrame(pcs_train, columns=feature_cols),
             train_df[["power_output"]].reset_index(drop=True),
         ],
         axis=1,
@@ -82,7 +82,7 @@ def main():
     predictor_out_df = pd.concat(
         [
             pred_df[["timestamp"]].reset_index(drop=True),
-            pd.DataFrame(pcs_pred, columns=pc_cols),
+            pd.DataFrame(pcs_pred, columns=feature_cols),
             pred_df[["power_output"]].reset_index(drop=True),
         ],
         axis=1,
@@ -93,7 +93,7 @@ def main():
     # helpful prints
     print("\n=== PCA Half-Year Split Complete ===")
     print(f"Features used: {features}")
-    print(f"PCs: {pc_cols}")
+    print(f"PCs: {feature_cols}")
     print(f"Explained variance ratio: {np.round(pca.explained_variance_ratio_, 4).tolist()}")
     print(f"\nTrainer saved to:   {trainer_out_path}")
     print(f"Predictor saved to: {predictor_out_path}")

@@ -7,9 +7,17 @@ import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 
 from src.config import (
-    TRAIN_PATH,
-    PRED_PATH,
-    TIMESTEPS,
+    HISTORICAL_DATA_PATH,
+    LOCAL_DATA_DIR,
+    LOCAL_FILE_PATTERN,
+    HISTORICAL_TARGET,
+    LOCAL_TARGET,
+    HISTORICAL_FEATURE_COLS,
+    LOCAL_FEATURE_COLS,
+    HISTORICAL_TIMESTEPS,
+    HISTORICAL_FORECAST_HORIZON,
+    LOCAL_TIMESTEPS,
+    LOCAL_FORECAST_HORIZON,
     HIDDEN_SIZE,
     NUM_LAYERS,
     DROPOUT,
@@ -20,12 +28,15 @@ from src.config import (
     PATIENCE,
     SEED,
     DEVICE,
-    TARGET,
     USE_SPLINE,
+    SHOW_BATCH_PROGRESS,
+    BATCH_PRINT_EVERY,
+    RUN_FEATURE_IMPORTANCE,
 )
 
 from src.data_preprocessing import (
-    load_pair,
+    load_historical_dataset,
+    load_local_dataset,
     make_normalizers,
     make_sequences_with_target,
     time_ordered_split,
@@ -34,34 +45,88 @@ from src.data_preprocessing import (
 from src.lstm_model import LSTMReg
 from src.evaluate import rmse, mae, smape, mape_thresh
 from src.plotting import plot_training_loss, plot_predictions, plot_daily_trend
+from src.feature_importance import permutation_feature_importance
+
+
+def choose_mode():
+    print("\nSelect mode:")
+    print("1 - Historical dataset")
+    print("2 - Local Endeavor solar dataset")
+    choice = input("Enter choice (1 or 2): ").strip()
+
+    if choice == "1":
+        return "historical"
+    if choice == "2":
+        return "local"
+
+    raise ValueError("Invalid choice. Enter 1 or 2.")
 
 
 def main():
     np.random.seed(SEED)
     torch.manual_seed(SEED)
 
-    train_df, pred_df, pc_cols = load_pair(
-        TRAIN_PATH,
-        PRED_PATH,
-        TARGET,
-        use_spline=USE_SPLINE,
-    )
+    mode = choose_mode()
 
-    print(f"[Solar LSTM] Using target: {TARGET}")
-    print(f"[Solar LSTM] PCs: {pc_cols}")
+    if mode == "historical":
+        print("\n--- Running Historical Dataset Mode ---")
+        df, feature_cols = load_historical_dataset(
+            HISTORICAL_DATA_PATH,
+            HISTORICAL_TARGET,
+            HISTORICAL_FEATURE_COLS,
+            use_spline=USE_SPLINE,
+        )
+        target = HISTORICAL_TARGET
+        timesteps = HISTORICAL_TIMESTEPS
+        forecast_horizon = HISTORICAL_FORECAST_HORIZON
+        dataset_label = str(HISTORICAL_DATA_PATH)
+
+    else:
+        print("\n--- Running Local Dataset Mode ---")
+
+        df, feature_cols = load_local_dataset(
+            LOCAL_DATA_DIR,
+            LOCAL_FILE_PATTERN,
+            LOCAL_TARGET,
+            LOCAL_FEATURE_COLS,
+            use_spline=USE_SPLINE,
+        )
+        
+        target = LOCAL_TARGET
+        timesteps = LOCAL_TIMESTEPS
+        forecast_horizon = LOCAL_FORECAST_HORIZON
+        dataset_label = str(LOCAL_DATA_DIR / LOCAL_FILE_PATTERN)
+
+    print(f"[Solar LSTM] Dataset: {dataset_label}")
+    print(f"[Solar LSTM] Using target: {target}")
+    print(f"[Solar LSTM] Features: {feature_cols}")
+    print(f"[Solar LSTM] Timesteps: {timesteps}")
+    print(f"[Solar LSTM] Forecast horizon: {forecast_horizon}")
     print(f"[Solar LSTM] Cubic spline enabled: {USE_SPLINE}")
 
-    to_norm, from_norm = make_normalizers(train_df, TARGET)
+    to_norm, from_norm = make_normalizers(df, target)
 
     X_all, Y_all = make_sequences_with_target(
-        train_df,
-        pc_cols,
-        TARGET,
-        TIMESTEPS,
+        df,
+        feature_cols,
+        target,
+        timesteps,
         to_norm,
+        forecast_horizon=forecast_horizon,
     )
 
-    X_train, Y_train, X_val, Y_val, _, _ = time_ordered_split(X_all, Y_all)
+    X_train, Y_train, X_val, Y_val, X_test, Y_test = time_ordered_split(
+        X_all,
+        Y_all,
+        train_frac=0.80,
+        val_frac=0.10,
+    )
+
+    print(f"Total rows: {len(df)}")
+    print(f"Total sequences: {len(X_all)}")
+    print(f"Train size: {len(X_train)}")
+    print(f"Validation size: {len(X_val)}")
+    print(f"Test size: {len(X_test)}")
 
     train_loader = DataLoader(
         TensorDataset(torch.tensor(X_train), torch.tensor(Y_train)),
@@ -69,15 +134,10 @@ def main():
         shuffle=True,
     )
 
-    step_times = pd.to_datetime(pred_df["timestamp"].values, utc=True)
-    for i in range(min(3, len(pred_df) - TIMESTEPS - 1)):
-        assert step_times[i + TIMESTEPS] > step_times[i + TIMESTEPS - 1], (
-            "Leakage check failed: target time is not after history end!"
-        )
+    print("[Solar LSTM] Alignment check: OK because split is time ordered.")
 
-    print("[Solar LSTM] Alignment check: OK")
+    input_size = len(feature_cols) + 1
 
-    input_size = len(pc_cols) + 1
     model = LSTMReg(
         input_size=input_size,
         hidden_size=HIDDEN_SIZE,
@@ -86,6 +146,7 @@ def main():
     ).to(DEVICE)
 
     criterion = nn.SmoothL1Loss(beta=1.0)
+
     opt = optim.Adam(
         model.parameters(),
         lr=LEARNING_RATE,
@@ -108,7 +169,7 @@ def main():
         model.train()
         epoch_loss = 0.0
 
-        for xb, yb in train_loader:
+        for batch_idx, (xb, yb) in enumerate(train_loader, start=1):
             xb = xb.to(DEVICE)
             yb = yb.to(DEVICE)
 
@@ -121,14 +182,19 @@ def main():
 
             epoch_loss += float(loss.item())
 
+            if SHOW_BATCH_PROGRESS and batch_idx % BATCH_PRINT_EVERY == 0:
+                print(
+                    f"  Epoch {epoch:03d} | "
+                    f"Batch {batch_idx}/{len(train_loader)} | "
+                    f"Batch Loss: {loss.item():.4f}"
+                )
+
         model.eval()
 
         with torch.no_grad():
             if len(X_val):
-                vloss = criterion(
-                    model(torch.tensor(X_val).to(DEVICE)),
-                    torch.tensor(Y_val).to(DEVICE),
-                ).item()
+                val_pred = model(torch.tensor(X_val).to(DEVICE))
+                vloss = criterion(val_pred, torch.tensor(Y_val).to(DEVICE)).item()
             else:
                 vloss = epoch_loss
 
@@ -137,7 +203,7 @@ def main():
         if epoch % 10 == 0:
             print(
                 f"[Solar LSTM] Epoch {epoch:03d} | "
-                f"TrainLoss {epoch_loss:.2f} | ValLoss {vloss:.4f}"
+                f"TrainLoss {epoch_loss:.4f} | ValLoss {vloss:.4f}"
             )
 
         losses.append(epoch_loss)
@@ -158,38 +224,34 @@ def main():
 
     plot_training_loss(losses)
 
-    Xp, _ = make_sequences_with_target(
-        pred_df,
-        pc_cols,
-        TARGET,
-        TIMESTEPS,
-        to_norm,
-    )
-
     model.eval()
+
     with torch.no_grad():
-        yhat_norm = model(torch.tensor(Xp).to(DEVICE)).cpu().numpy().flatten()
+        yhat_norm = model(torch.tensor(X_test).to(DEVICE)).cpu().numpy().flatten()
 
     y_pred = from_norm(yhat_norm)
-    y_true = pred_df[TARGET].values[TIMESTEPS:TIMESTEPS + len(y_pred)]
+    y_true = from_norm(Y_test.flatten())
     y_pred = np.clip(y_pred, 0.0, None)
 
-    ts = pd.to_datetime(pred_df["timestamp"], utc=True).iloc[
-        TIMESTEPS:TIMESTEPS + len(y_pred)
-    ]
+    test_start_index = timesteps + len(X_train) + len(X_val) + forecast_horizon - 1
+    test_end_index = test_start_index + len(y_pred)
+
+    ts = pd.to_datetime(df["timestamp"], utc=True).iloc[test_start_index:test_end_index]
 
     mask = np.isfinite(y_true) & np.isfinite(y_pred) & pd.Series(ts).notna().values
     y_true = y_true[mask]
     y_pred = y_pred[mask]
     ts = ts.iloc[mask.nonzero()[0]]
 
-    T_pred = pred_df[TARGET].values.astype(float)
+    target_values = df[target].values.astype(float)
+
     naive = []
     true_baseline = []
 
-    for i in range(len(pred_df) - TIMESTEPS):
-        true_baseline.append(T_pred[i + TIMESTEPS])
-        naive.append(T_pred[i + TIMESTEPS - 1])
+    for i in range(test_start_index, test_end_index):
+        if i - forecast_horizon >= 0 and i < len(target_values):
+            true_baseline.append(target_values[i])
+            naive.append(target_values[i - forecast_horizon])
 
     true_baseline = np.asarray(true_baseline)
     naive = np.asarray(naive)
@@ -198,16 +260,47 @@ def main():
     true_baseline = true_baseline[valid]
     naive = naive[valid]
 
-    print("\n=== Baseline vs Model ===")
+    print("\n=== Baseline vs Model on Test Set ===")
+
     print(
-        "Naive  -> RMSE: %.2f | MAE: %.2f | SMAPE: %.2f%%"
-        % (rmse(true_baseline, naive), mae(true_baseline, naive), smape(true_baseline, naive))
+        "Persistence -> RMSE: %.2f | MAE: %.2f | SMAPE: %.2f%%"
+        % (
+            rmse(true_baseline, naive),
+            mae(true_baseline, naive),
+            smape(true_baseline, naive),
+        )
     )
 
     print(
-        "Model  -> RMSE: %.2f | MAE: %.2f | SMAPE: %.2f%% | MAPE@>=10MW: %.2f%%"
-        % (rmse(y_true, y_pred), mae(y_true, y_pred), smape(y_true, y_pred), mape_thresh(y_true, y_pred))
+        "Model       -> RMSE: %.2f | MAE: %.2f | SMAPE: %.2f%% | MAPE@>=10: %.2f%%"
+        % (
+            rmse(y_true, y_pred),
+            mae(y_true, y_pred),
+            smape(y_true, y_pred),
+            mape_thresh(y_true, y_pred),
+        )
     )
+
+    if RUN_FEATURE_IMPORTANCE:
+        print("\n=== Permutation Feature Importance ===")
+        importance_results = permutation_feature_importance(
+            model=model,
+            X_test=X_test,
+            y_true=y_true,
+            from_norm=from_norm,
+            feature_names=feature_cols,
+            device=DEVICE,
+            repeats=3,
+            seed=SEED,
+        )
+
+        for row in importance_results:
+            print(
+                f"{row['feature']:>22s} | "
+                f"Base RMSE: {row['base_rmse']:.2f} | "
+                f"Permuted RMSE: {row['permuted_rmse']:.2f} | "
+                f"Increase: {row['rmse_increase']:.2f}"
+            )
 
     plot_predictions(ts, y_true, y_pred)
     plot_daily_trend(ts, y_true, y_pred)

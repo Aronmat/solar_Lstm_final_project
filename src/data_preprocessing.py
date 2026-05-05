@@ -5,48 +5,81 @@ from pathlib import Path
 from src.spline_interpolation import cubic_spline_fill
 
 
-def load_pair(tp: Path, pp: Path, target: str, use_spline=True):
-    if not tp.exists():
-        raise FileNotFoundError(f"Missing trainer CSV: {tp}")
-    if not pp.exists():
-        raise FileNotFoundError(f"Missing predictor CSV: {pp}")
+def load_historical_dataset(path: Path, target: str, feature_cols, use_spline=True):
+    if not path.exists():
+        raise FileNotFoundError(f"Missing historical dataset file: {path}")
 
-    train_df = pd.read_csv(tp)
-    pred_df = pd.read_csv(pp)
+    if path.suffix.lower() in [".xlsx", ".xls"]:
+        df = pd.read_excel(path)
+    else:
+        df = pd.read_csv(path)
 
-    for df in (train_df, pred_df):
-        if "utc_timestamp" in df.columns and "timestamp" not in df.columns:
-            df.rename(columns={"utc_timestamp": "timestamp"}, inplace=True)
+    return clean_dataset(df, target, feature_cols, use_spline=use_spline)
 
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
-        df.dropna(subset=["timestamp"], inplace=True)
-        df.sort_values("timestamp", inplace=True)
-        df.reset_index(drop=True, inplace=True)
 
-        if target not in df.columns:
-            raise ValueError(f"'{target}' must exist in both CSVs.")
+def load_local_dataset(folder: Path, pattern: str, target: str, feature_cols, use_spline=True):
+    files = sorted(folder.glob(pattern))
 
-        df[target] = pd.to_numeric(df[target], errors="coerce")
+    if not files:
+        raise FileNotFoundError(f"No local CSV files found in {folder} matching {pattern}")
 
-        if use_spline:
-            x = np.arange(len(df), dtype=float)
+    frames = []
+    for file in files:
+        tmp = pd.read_csv(file)
+        tmp["source_file"] = file.name
+        frames.append(tmp)
+
+    df = pd.concat(frames, ignore_index=True)
+
+    return clean_dataset(df, target, feature_cols, use_spline=use_spline)
+
+
+def clean_dataset(df, target: str, feature_cols, use_spline=True):
+    if "utc_timestamp" in df.columns and "timestamp" not in df.columns:
+        df.rename(columns={"utc_timestamp": "timestamp"}, inplace=True)
+
+    if "timestamp" not in df.columns:
+        raise ValueError("Dataset must contain a 'timestamp' or 'utc_timestamp' column.")
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+    df.dropna(subset=["timestamp"], inplace=True)
+    df.sort_values("timestamp", inplace=True)
+    df.reset_index(drop=True, inplace=True)
+
+    if target not in df.columns:
+        raise ValueError(f"'{target}' must exist in dataset.")
+
+    missing_features = [c for c in feature_cols if c not in df.columns]
+    if missing_features:
+        raise ValueError(f"Missing feature columns: {missing_features}")
+
+    df[target] = pd.to_numeric(df[target], errors="coerce")
+
+    if use_spline:
+        x = np.arange(len(df), dtype=float)
+        if np.isfinite(df[target].values).sum() >= 3:
             df[target] = cubic_spline_fill(x, df[target].values)
+        else:
+            df[target] = df[target].ffill().bfill()
 
-        df[target] = df[target].rolling(5, min_periods=1).mean()
+    df[target] = df[target].rolling(5, min_periods=1).mean()
 
-    def pc_key(col):
-        s = str(col)
-        return int("".join(ch for ch in s if ch.isdigit()) or 0)
+    for col in feature_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    pcs_t = [c for c in train_df.columns if str(c).upper().startswith("PC")]
-    pcs_p = [c for c in pred_df.columns if str(c).upper().startswith("PC")]
+        if df[col].isna().any():
+            x = np.arange(len(df), dtype=float)
+            values = df[col].values
 
-    pc_cols = [c for c in sorted(pcs_t, key=pc_key) if c in pcs_p]
+            if use_spline and np.isfinite(values).sum() >= 3:
+                df[col] = cubic_spline_fill(x, values)
+            else:
+                df[col] = df[col].ffill().bfill()
 
-    if not pc_cols:
-        raise ValueError("No common PC columns between trainer and predictor.")
+    df.dropna(subset=feature_cols + [target], inplace=True)
+    df.reset_index(drop=True, inplace=True)
 
-    return train_df, pred_df, pc_cols
+    return df, feature_cols
 
 
 def make_normalizers(train_df, target):
@@ -63,25 +96,27 @@ def make_normalizers(train_df, target):
     return to_norm, from_norm
 
 
-def make_sequences_with_target(df, pc_cols, target_col, steps, to_norm):
-    V = df[pc_cols].values.astype(np.float32)
+def make_sequences_with_target(df, feature_cols, target_col, steps, to_norm, forecast_horizon=1):
+    V = df[feature_cols].values.astype(np.float32)
     T = df[target_col].values.astype(np.float32)
     Tn = to_norm(T)
 
     X, Y = [], []
 
-    for i in range(len(df) - steps):
-        x_pc = V[i:i + steps]
-        x_target = Tn[i:i + steps].reshape(steps, 1)
-        y_next = Tn[i + steps]
+    max_i = len(df) - steps - forecast_horizon + 1
 
-        X.append(np.concatenate([x_pc, x_target], axis=1))
-        Y.append([y_next])
+    for i in range(max_i):
+        x_features = V[i:i + steps]
+        x_target = Tn[i:i + steps].reshape(steps, 1)
+        y_future = Tn[i + steps + forecast_horizon - 1]
+
+        X.append(np.concatenate([x_features, x_target], axis=1))
+        Y.append([y_future])
 
     return np.asarray(X, np.float32), np.asarray(Y, np.float32)
 
 
-def time_ordered_split(X, Y, train_frac=0.70, val_frac=0.15):
+def time_ordered_split(X, Y, train_frac=0.80, val_frac=0.10):
     s1 = int(train_frac * len(X))
     s2 = int((train_frac + val_frac) * len(X))
 

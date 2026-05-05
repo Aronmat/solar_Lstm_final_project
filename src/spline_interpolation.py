@@ -8,6 +8,7 @@ def cubic_spline_fill(x, y):
 
     if x.ndim != 1 or y.ndim != 1:
         raise ValueError("x and y must be 1D arrays.")
+
     if len(x) != len(y):
         raise ValueError("x and y must have the same length.")
 
@@ -18,7 +19,7 @@ def cubic_spline_fill(x, y):
 
     spline = CubicSpline(x[valid], y[valid], extrapolate=True)
 
-    y_filled = y.copy()
-    y_filled[~valid] = spline(x[~valid])
+    filled = y.copy()
+    filled[~valid] = spline(x[~valid])
 
-    return y_filled
+    return filled
