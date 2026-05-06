@@ -76,6 +76,7 @@ def main():
             HISTORICAL_FEATURE_COLS,
             use_spline=USE_SPLINE,
         )
+        
         target = HISTORICAL_TARGET
         timesteps = HISTORICAL_TIMESTEPS
         forecast_horizon = HISTORICAL_FORECAST_HORIZON
@@ -91,7 +92,7 @@ def main():
             LOCAL_FEATURE_COLS,
             use_spline=USE_SPLINE,
         )
-        
+
         target = LOCAL_TARGET
         timesteps = LOCAL_TIMESTEPS
         forecast_horizon = LOCAL_FORECAST_HORIZON
