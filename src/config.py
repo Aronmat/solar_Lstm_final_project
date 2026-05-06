@@ -17,13 +17,8 @@ HISTORICAL_FEATURE_COLS = [
     "dew",
 ]
 
-LLOCAL_FEATURE_COLS = [
+LOCAL_FEATURE_COLS = [
     "Solar_Irradiance_Wm2",
-    "UV_Index",
-    "Air_Temp_C",
-    "Humidity_pct",
-    "Air_Pressure_inHg",
-    "Wind_Speed_ms",
     "PV_Current_A",
     "PV_Voltage_V",
     "Battery_Power_W",
